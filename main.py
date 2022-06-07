@@ -1,32 +1,34 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.inspection import DecisionBoundaryDisplay
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.linear_model import LogisticRegression
 
-
-def plot_decision_boundary(data, estimator, label: str):
-    # Plotting decision regions
-    DecisionBoundaryDisplay.from_estimator(
-        estimator, data.drop(columns=["T", "Y"]), alpha=0.4, response_method="predict"
-    )
-    plt.scatter(data[:, 0], data[:, 1], c=data[label], s=20, edgecolor="k")
-
-    plt.show()
+from sklearn.model_selection import cross_val_score
 
 
 def inverse_propensity_weighting(data: pd.DataFrame):
-    model = RandomForestClassifier(max_depth=10, random_state=0)
-
     features = data.drop(columns=["T", "Y"])
-    labels = data["T"]
+    treatments = data["T"]
+    results = data["Y"]
 
-    model.fit(features, labels)
+    model = LogisticRegression(max_iter=1e5)
+
+    model.fit(features, treatments)
     probabilities = model.predict_proba(features)
 
-    plot_decision_boundary(data, model, "T")
+    propensity_weighting = probabilities[:, 1] / probabilities[:, 0]
 
-    print(probabilities)
+    treatment_mask = treatments == 1
+    treated_weight = np.sum(results[treatment_mask]) / np.sum(treatments)
+    untreated_weight = np.sum(results[~treatment_mask] * propensity_weighting[~treatment_mask]) \
+                       / np.sum(propensity_weighting[~treatment_mask])
+
+    ATT = treated_weight - untreated_weight
+    return ATT
 
 
 def main():
@@ -39,8 +41,8 @@ def main():
     df_1 = pd.get_dummies(df_1)
     df_2 = pd.get_dummies(df_2)
 
-    inverse_propensity_weighting(df_1)
-    inverse_propensity_weighting(df_2)
+    print(f"IPW ATT: {inverse_propensity_weighting(df_1)}")
+    print(f"IPW ATT: {inverse_propensity_weighting(df_2)}")
 
 
 if __name__ == '__main__':
