@@ -1,16 +1,20 @@
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from scipy.spatial import distance_matrix
+import matplotlib.pyplot as plt
 
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import NearestNeighbors
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.kernel_ridge import KernelRidge
 
-from sklearn.model_selection import cross_val_score
+from causalinference import CausalModel
+from causallib.estimation import IPW, Matching
 
 
 def inverse_propensity_weighting(data: pd.DataFrame):
+    """IPW using random forest classifier"""
     features = data.drop(columns=["T", "Y"])
     treatments = data["T"]
     results = data["Y"]
@@ -32,8 +36,9 @@ def inverse_propensity_weighting(data: pd.DataFrame):
 
 
 def s_learner(data: pd.DataFrame):
+    """S learner - using random forest regressor"""
     features = data.drop(columns=["Y"])
-    features[[f"T_{column}" for column in features.columns]] = features.apply(lambda row: row * row["T"], axis=1)
+    # features[[f"T_{column}" for column in features.columns]] = features.apply(lambda row: row * row["T"], axis=1)
     treatments = data["T"]
     results = data["Y"]
 
@@ -51,20 +56,19 @@ def s_learner(data: pd.DataFrame):
     treatment_mask = treatments == 1
     ATT = np.mean(predictions_1[treatment_mask] - predictions_0[treatment_mask])
 
-    print(f"MSE: {np.mean(np.square(model.predict(features) - results))}")
-
     return ATT
 
 
 def t_learner(data: pd.DataFrame):
+    """T learner using random forest regression"""
     features = data.drop(columns=["Y", "T"])
     treatments = data["T"]
     results = data["Y"]
 
     treatment_mask = treatments == 1
 
-    model_0 = RandomForestRegressor(max_depth=5, oob_score=True)
-    model_1 = RandomForestRegressor(max_depth=5, oob_score=True)
+    model_0 = RandomForestRegressor(max_depth=15, oob_score=True)
+    model_1 = RandomForestRegressor(max_depth=15, oob_score=True)
     # model_0 = KernelRidge(kernel="rbf", gamma=0.1)
     # model_1 = KernelRidge(kernel="rbf", gamma=0.1)
 
@@ -80,23 +84,72 @@ def t_learner(data: pd.DataFrame):
 
 
 def matching(data: pd.DataFrame):
+    """K-NN matching"""
     features = data.drop(columns=["Y", "T"])
     treatments = data["T"]
     results = data["Y"]
 
     treatment_mask = treatments == 1
 
-    distances = distance_matrix(features[treatment_mask], features[~treatment_mask])
+    num_neighbors = 1
 
-    treated_neighbors = np.argmin(distances, axis=1)
-    untreated_neighbors = np.argmin(distances, axis=0)
+    data_covariance = np.cov(features.T)
 
-    ite_treated = results[treatment_mask].to_numpy() - results[treated_neighbors].to_numpy()
-    ite_untreated = results[~treatment_mask].to_numpy() - results[untreated_neighbors].to_numpy()
+    # knn = NearestNeighbors(n_neighbors=num_neighbors, metric="mahalanobis", metric_params={"V": data_covariance})
+    # knn.fit(features[treatment_mask], results[treatment_mask])
+    # _, untreated_neighbors = knn.kneighbors(features[~treatment_mask])
 
-    ATT = np.mean(np.concatenate([ite_treated, ite_untreated]))
+    knn = NearestNeighbors(n_neighbors=num_neighbors, metric="mahalanobis", metric_params={"V": data_covariance})
+    knn.fit(features[~treatment_mask], results[~treatment_mask])
+    _, treated_neighbors = knn.kneighbors(features[treatment_mask])
+
+    ite_treated = results[treatment_mask].to_numpy() - np.take_along_axis(
+        results[~treatment_mask].to_numpy().reshape(-1, 1), treated_neighbors, axis=0).mean(axis=1)
+    # ite_untreated = results[~treatment_mask].to_numpy() - np.take_along_axis(
+    #     results[treatment_mask].to_numpy().reshape(-1, 1), untreated_neighbors, axis=0).mean(axis=1)
+
+    # ATT = np.mean(np.concatenate([ite_treated, ite_untreated]))
+    ATT = np.mean(ite_treated)
 
     return ATT
+
+
+def comp_att(data: pd.DataFrame):
+    features = data.drop(columns=["Y", "T"])
+    treatments = data["T"]
+    results = data["Y"]
+
+    treatment_mask = treatments == 1
+
+    # ipw = IPW(RandomForestClassifier(max_depth=10, class_weight="balanced"))
+    # ipw.fit(features, treatments)
+    # print(
+    #     f"""\tIPW (Forest) COMP ATT: {ipw.estimate_population_outcome(features[treatment_mask],
+    #                                                                   treatments[treatment_mask], results[treatment_mask])}""")
+    #
+    # ipw = IPW(LogisticRegression(max_iter=1e6))
+    # ipw.fit(features, treatments)
+    # print(
+    #     f"""\tIPW (LR) COMP ATT: {ipw.estimate_population_outcome(features[treatment_mask],
+    #                                                               treatments[treatment_mask], results[treatment_mask])}""")
+    #
+    # model = Matching()
+    # model.fit(features, treatments, results)
+    # print(f"""Matching COMP ATT: {model.estimate_individual_outcome(features[treatment_mask],
+    #                                                                 treatments[treatment_mask]).mean()}""")
+
+    model = CausalModel(results.values, treatments.values, features.values)
+    model.est_via_matching()
+    print(model.estimates)
+    model.reset()
+    model.est_via_ols()
+    print(model.estimates)
+    model.reset()
+    model.est_propensity_s()
+    model.est_via_weighting()
+    print(model.estimates)
+    model.reset()
+
 
 
 def main():
@@ -109,17 +162,19 @@ def main():
     df_1 = pd.get_dummies(df_1)
     df_2 = pd.get_dummies(df_2)
 
-    # print(f"IPW ATT: {inverse_propensity_weighting(df_1)}")
-    # print(f"IPW ATT: {inverse_propensity_weighting(df_2)}")
+    print("Data 1:")
+    print(f"\tIPW: {inverse_propensity_weighting(df_1)}")
+    print(f"\tS Learner: {s_learner(df_1)}")
+    print(f"\tT Learner: {t_learner(df_1)}")
+    print(f"\tMatching: {matching(df_1)}")
+    # comp_att(df_1)
 
-    # print(f"S Learner ATT: {s_learner(df_1)}")
-    # print(f"S Learner ATT: {s_learner(df_2)}")
-
-    # print(f"T Learner ATT: {t_learner(df_1)}")
-    # print(f"T Learner ATT: {t_learner(df_2)}")
-
-    print(f"Matching ATT: {matching(df_1)}")
-    print(f"Matching ATT: {matching(df_2)}")
+    print("Data 2:")
+    print(f"\tIPW: {inverse_propensity_weighting(df_2)}")
+    print(f"\tS Learner: {s_learner(df_2)}")
+    print(f"\tT Learner: {t_learner(df_2)}")
+    print(f"\tMatching: {matching(df_2)}")
+    # comp_att(df_2)
 
 
 if __name__ == '__main__':
